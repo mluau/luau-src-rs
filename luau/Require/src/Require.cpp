@@ -7,6 +7,8 @@
 #include "lua.h"
 #include "lualib.h"
 
+#include <new>
+
 static void validateConfig(lua_State* L, const luarequire_Configuration& config)
 {
     if (!config.is_require_allowed)
@@ -27,8 +29,8 @@ static void validateConfig(lua_State* L, const luarequire_Configuration& config)
         luaL_error(L, "require configuration is missing required function pointer: get_loadname");
     if (!config.get_cache_key)
         luaL_error(L, "require configuration is missing required function pointer: get_cache_key");
-    if (!config.is_config_present)
-        luaL_error(L, "require configuration is missing required function pointer: is_config_present");
+    if (!config.get_config_status)
+        luaL_error(L, "require configuration is missing required function pointer: get_config_status");
     if (config.get_alias && config.get_config)
         luaL_error(L, "require configuration cannot define both get_alias and get_config");
     if (!config.get_alias && !config.get_config)
@@ -45,10 +47,11 @@ static int pushrequireclosureinternal(
     const char* debugname
 )
 {
-    luarequire_Configuration* config = static_cast<luarequire_Configuration*>(lua_newuserdata(L, sizeof(luarequire_Configuration)));
-    if (!config)
+    void* ud = (lua_newuserdata(L, sizeof(luarequire_Configuration)));
+    if (!ud)
         luaL_error(L, "failed to allocate memory for require configuration");
 
+    luarequire_Configuration* config = new (ud) luarequire_Configuration{};
     config_init(config);
     validateConfig(L, *config);
 

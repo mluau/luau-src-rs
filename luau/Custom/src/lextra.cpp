@@ -1,5 +1,6 @@
 #include "lua.h"
 #include "lapi.h"
+#include "lgc.h"
 #include "lobject.h"
 #include "lstate.h"
 #include "lgc.h"
@@ -28,4 +29,9 @@ extern "C" const char* lua_gcstatename(int state)
 
 extern "C" int64_t lua_gcallocationrate(lua_State* L) {
     return luaC_allocationrate(L);
+}
+
+extern "C" void lua_gcdump(lua_State* L, void* file, const char* (*categoryName)(lua_State* L, uint8_t memcat))
+{
+    luaC_dump(L, file, categoryName);
 }

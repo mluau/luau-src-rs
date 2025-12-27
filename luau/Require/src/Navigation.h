@@ -4,6 +4,7 @@
 #include "Luau/RequireNavigator.h"
 #include "Luau/Require.h"
 
+#include <chrono>
 #include <string>
 
 struct lua_State;
@@ -11,6 +12,17 @@ struct luarequire_Configuration;
 
 namespace Luau::Require
 {
+
+class RuntimeLuauConfigTimer
+{
+public:
+    void start(int timeoutMs);
+    bool isFinished() const;
+
+private:
+    std::chrono::steady_clock::time_point startTime;
+    std::optional<std::chrono::steady_clock::duration> timeoutDuration;
+};
 
 class RuntimeNavigationContext : public NavigationContext
 {
@@ -22,11 +34,12 @@ public:
     // Navigation interface
     NavigateResult reset(const std::string& requirerChunkname) override;
     NavigateResult jumpToAlias(const std::string& path) override;
+    NavigateResult toAliasFallback(const std::string& aliasUnprefixed) override;
 
     NavigateResult toParent() override;
     NavigateResult toChild(const std::string& component) override;
 
-    bool isConfigPresent() const override;
+    NavigationContext::ConfigStatus getConfigStatus() const override;
     NavigationContext::ConfigBehavior getConfigBehavior() const override;
     std::optional<std::string> getAlias(const std::string& alias) const override;
     std::optional<std::string> getConfig() const override;
@@ -52,6 +65,7 @@ private:
     lua_State* L;
     void* ctx;
     std::string requirerChunkname;
+    RuntimeLuauConfigTimer timer = RuntimeLuauConfigTimer{};
 };
 
 // Non-throwing error reporter

@@ -134,11 +134,11 @@ impl Build {
         config
             .clone()
             .include(&ast_include_dir)
-            .add_files_by_ext(&ast_source_dir, "cpp")
+            .add_files_by_ext_sorted(&ast_source_dir, "cpp")
             .out_dir(&build_dir)
             .compile(ast_lib_name);
 
-        // Build `CogeGen` library
+        // Build `CodeGen` library
         let codegen_lib_name = "luaucodegen";
         let codegen_source_dir = source_base_dir.join("luau").join("CodeGen").join("src");
         let codegen_include_dir = source_base_dir.join("luau").join("CodeGen").join("include");
@@ -153,10 +153,21 @@ impl Build {
                 .include(&vm_include_dir)
                 .include(&vm_source_dir)
                 .define("LUACODEGEN_API", "extern \"C\"")
-                .add_files_by_ext(&codegen_source_dir, "cpp")
+                .add_files_by_ext_sorted(&codegen_source_dir, "cpp")
                 .out_dir(&build_dir)
                 .compile(codegen_lib_name);
         }
+
+        // Build `Common` library
+        let common_lib_name = "luaucommon";
+        let common_source_dir = source_base_dir.join("luau").join("Common").join("src");
+        let common_include_dir = (source_base_dir.join("luau").join("Common")).join("include");
+        config
+            .clone()
+            .include(&common_include_dir)
+            .add_files_by_ext_sorted(&common_source_dir, "cpp")
+            .out_dir(&build_dir)
+            .compile(common_lib_name);
 
         // Build `Compiler` library
         let compiler_lib_name = "luaucompiler";
@@ -167,9 +178,23 @@ impl Build {
             .include(&compiler_include_dir)
             .include(&ast_include_dir)
             .define("LUACODE_API", "extern \"C\"")
-            .add_files_by_ext(&compiler_source_dir, "cpp")
+            .add_files_by_ext_sorted(&compiler_source_dir, "cpp")
             .out_dir(&build_dir)
             .compile(compiler_lib_name);
+
+        // Build `Config` library
+        let config_lib_name = "luauconfig";
+        let config_source_dir = source_base_dir.join("luau").join("Config").join("src");
+        let config_include_dir = source_base_dir.join("luau").join("Config").join("include");
+        config
+            .clone()
+            .include(&config_include_dir)
+            .include(&ast_include_dir)
+            .include(&compiler_include_dir)
+            .include(&vm_include_dir)
+            .add_files_by_ext_sorted(&config_source_dir, "cpp")
+            .out_dir(&build_dir)
+            .compile(config_lib_name);
 
         // Build customization library
         let custom_lib_name = "luaucustom";
@@ -178,32 +203,21 @@ impl Build {
             .clone()
             .include(&vm_include_dir)
             .include(&vm_source_dir)
-            .add_files_by_ext(&custom_source_dir, "cpp")
+            .add_files_by_ext_sorted(&custom_source_dir, "cpp")
             .out_dir(&build_dir)
             .compile(custom_lib_name);
 
         // Build `Require` library
         let require_lib_name = "luaurequire";
-        let require_base_dir = source_base_dir.join("luau").join("Require");
-        let require_source_dirs = &[
-            require_base_dir.join("Navigator").join("src"),
-            require_base_dir.join("Runtime").join("src"),
-            source_base_dir.join("luau").join("Config").join("src"),
-        ];
-        let require_include_dirs = &[
-            require_base_dir.join("Navigator").join("include"),
-            require_base_dir.join("Runtime").join("include"),
-            source_base_dir.join("luau").join("Config").join("include"),
-        ];
-        let mut require_config = config.clone();
-        for (source_dir, include_dir) in require_source_dirs.iter().zip(require_include_dirs) {
-            require_config
-                .include(include_dir)
-                .add_files_by_ext(source_dir, "cpp");
-        }
-        require_config
+        let require_source_dir = source_base_dir.join("luau").join("Require").join("src");
+        let require_include_dir = source_base_dir.join("luau").join("Require").join("include");
+        config
+            .clone()
+            .include(&require_include_dir)
             .include(&ast_include_dir)
+            .include(&config_include_dir)
             .include(&vm_include_dir)
+            .add_files_by_ext_sorted(&require_source_dir, "cpp")
             .out_dir(&build_dir)
             .compile(require_lib_name);
 
@@ -212,7 +226,7 @@ impl Build {
         config
             .clone()
             .include(&vm_include_dir)
-            .add_files_by_ext(&vm_source_dir, "cpp")
+            .add_files_by_ext_sorted(&vm_source_dir, "cpp")
             .out_dir(&build_dir)
             .compile(vm_lib_name);
 
@@ -222,6 +236,8 @@ impl Build {
                 vm_lib_name.to_string(),
                 compiler_lib_name.to_string(),
                 ast_lib_name.to_string(),
+                common_lib_name.to_string(),
+                config_lib_name.to_string(),
                 custom_lib_name.to_string(),
                 require_lib_name.to_string(),
             ],
@@ -298,18 +314,28 @@ impl Artifacts {
 }
 
 trait AddFilesByExt {
-    fn add_files_by_ext(&mut self, dir: &Path, ext: &str) -> &mut Self;
+    fn add_files_by_ext_sorted(&mut self, dir: &Path, ext: &str) -> &mut Self;
 }
 
 impl AddFilesByExt for cc::Build {
-    fn add_files_by_ext(&mut self, dir: &Path, ext: &str) -> &mut Self {
-        for entry in fs::read_dir(dir)
+    // It's important to keep the order of the files to get consistent builds between machines
+    // if the order is not always the same, the final binary produces a different SHA256 which
+    // might cause issues if one needs to verify which binary is being executed
+    fn add_files_by_ext_sorted(&mut self, dir: &Path, ext: &str) -> &mut Self {
+        let mut sources: Vec<_> = fs::read_dir(dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension() == Some(ext.as_ref()))
-        {
-            self.file(entry.path());
+            .map(|e| e.path())
+            .collect();
+
+        // Sort for determinism
+        sources.sort();
+
+        for source in sources {
+            self.file(source);
         }
+
         self
     }
 }

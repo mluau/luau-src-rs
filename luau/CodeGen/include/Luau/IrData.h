@@ -15,6 +15,8 @@
 
 struct Proto;
 
+LUAU_FASTFLAG(LuauCodegenChainedSpills)
+
 namespace Luau
 {
 namespace CodeGen
@@ -151,6 +153,9 @@ enum class IrCmd : uint8_t
     DIV_NUM,
     IDIV_NUM,
     MOD_NUM,
+    // A * B + C
+    // A, B, C: double
+    MULADD_NUM,
 
     // Get the minimum/maximum of two numbers
     // If one of the values is NaN, 'B' is returned as the result
@@ -192,12 +197,20 @@ enum class IrCmd : uint8_t
     // C, D: double (condition arguments)
     SELECT_NUM,
 
+    // For each lane in the vector, select B if C == D, otherwise select A
+    // A, B: TValue (endpoints)
+    // C, D: TValue (condition arguments)
+    SELECT_VEC,
+
     // Add/Sub/Mul/Div/Idiv two vectors
     // A, B: TValue
     ADD_VEC,
     SUB_VEC,
     MUL_VEC,
     DIV_VEC,
+    // Lanewise A * B + C
+    // A, B, C: TValue
+    MULADD_VEC,
 
     // Negate a vector
     // A: TValue
@@ -216,6 +229,23 @@ enum class IrCmd : uint8_t
     // A, B: Rn
     // C: condition
     CMP_ANY,
+
+    // Perform a comparison of two integer numbers. Result is an integer register containing 0 or 1
+    // A, B: int
+    // C: condition
+    CMP_INT,
+
+    // Perform a comparison of two tags. Result is an integer register containing 0 or 1
+    CMP_TAG,
+    // A, B: tag
+    // C: condition (eq/not_eq)
+
+    // Perform tag and value comparison. Result is an integer register containing 0 or 1
+    CMP_SPLIT_TVALUE,
+    // A: tag
+    // B: tag (constant: boolean/number/string)
+    // C, D: value
+    // E: condition (eq/not_eq)
 
     // Unconditional jump
     // A: block/vmexit/undef
@@ -392,12 +422,6 @@ enum class IrCmd : uint8_t
     // C: Rn or unsigned int (key)
     SET_TABLE,
 
-    // TODO: remove with FFlagLuauCodeGenSimplifyImport2
-    // Lookup a value in the environment
-    // A: Rn (where to store the result)
-    // B: unsigned int (import path)
-    GET_IMPORT,
-
     // Store an import from constant or the import path
     // A: Rn (where to store the result)
     // B: Kn
@@ -452,7 +476,7 @@ enum class IrCmd : uint8_t
     CHECK_NO_METATABLE,
 
     // Guard against executing in unsafe environment, exits to VM on check failure
-    // A: vmexit/vmexit/undef
+    // A: block/vmexit/undef
     // When undef is specified, execution is aborted on check failure
     CHECK_SAFE_ENV,
 
@@ -643,7 +667,7 @@ enum class IrCmd : uint8_t
     // C: Kn (prototype)
     FALLBACK_DUPCLOSURE,
 
-    // Prepare loop variables for a generic for loop, jump to the loop backedge unconditionally
+    // Prepare loop variables for a generic for loop, jump to the loop back edge unconditionally
     // A: unsigned int (bytecode instruction index)
     // B: Rn (loop state start, updates Rn Rn+1 Rn+2)
     // C: block
@@ -978,10 +1002,15 @@ enum class IrBlockKind : uint8_t
     Dead,
 };
 
+inline constexpr uint32_t kBlockNoStartPc = ~0u;
+
+inline constexpr uint8_t kBlockFlagSafeEnvCheck = 1 << 0;
+inline constexpr uint8_t kBlockFlagSafeEnvClear = 1 << 1;
+
 struct IrBlock
 {
     IrBlockKind kind;
-
+    uint8_t flags = 0;
     uint16_t useCount = 0;
 
     // 'start' and 'finish' define an inclusive range of instructions which belong to this block inside the function
@@ -992,6 +1021,8 @@ struct IrBlock
     uint32_t sortkey = ~0u;
     uint32_t chainkey = 0;
     uint32_t expectedNextBlock = ~0u;
+
+    uint32_t startpc = kBlockNoStartPc;
 
     Label label;
 };
@@ -1036,6 +1067,13 @@ struct BytecodeTypeInfo
     std::vector<uint32_t> regTypeOffsets;
 };
 
+struct ValueRestoreLocation
+{
+    IrOp op;             // Operand representing the location (Rn/Kn)
+    IrValueKind kind;    // The kind of value at the restore location
+    IrCmd conversionCmd; // Type conversion instruction that was used to store the value at the restore location
+};
+
 struct IrFunction
 {
     std::vector<IrBlock> blocks;
@@ -1048,9 +1086,11 @@ struct IrFunction
     std::vector<BytecodeMapping> bcMapping;
     uint32_t entryBlock = 0;
     uint32_t entryLocation = 0;
+    uint32_t endLocation = 0;
 
     // For each instruction, an operand that can be used to recompute the value
-    std::vector<IrOp> valueRestoreOps;
+    std::vector<IrOp> valueRestoreOps_DEPRECATED; // TODO: Remove with FFlagLuauCodegenChainedSpills
+    std::vector<ValueRestoreLocation> valueRestoreOps_NEW;
     std::vector<uint32_t> validRestoreOpBlocks;
 
     BytecodeTypeInfo bcTypeInfo;
@@ -1194,17 +1234,21 @@ struct IrFunction
         return uint32_t(&inst - instructions.data());
     }
 
-    void recordRestoreOp(uint32_t instIdx, IrOp location)
+    void recordRestoreOp_DEPRECATED(uint32_t instIdx, IrOp location)
     {
-        if (instIdx >= valueRestoreOps.size())
-            valueRestoreOps.resize(instIdx + 1);
+        CODEGEN_ASSERT(!FFlag::LuauCodegenChainedSpills);
 
-        valueRestoreOps[instIdx] = location;
+        if (instIdx >= valueRestoreOps_DEPRECATED.size())
+            valueRestoreOps_DEPRECATED.resize(instIdx + 1);
+
+        valueRestoreOps_DEPRECATED[instIdx] = location;
     }
 
-    IrOp findRestoreOp(uint32_t instIdx, bool limitToCurrentBlock) const
+    IrOp findRestoreOp_DEPRECATED(uint32_t instIdx, bool limitToCurrentBlock) const
     {
-        if (instIdx >= valueRestoreOps.size())
+        CODEGEN_ASSERT(!FFlag::LuauCodegenChainedSpills);
+
+        if (instIdx >= valueRestoreOps_DEPRECATED.size())
             return {};
 
         // When spilled, values can only reference restore operands in the current block chain
@@ -1215,18 +1259,69 @@ struct IrFunction
                 const IrBlock& block = blocks[blockIdx];
 
                 if (instIdx >= block.start && instIdx <= block.finish)
-                    return valueRestoreOps[instIdx];
+                    return valueRestoreOps_DEPRECATED[instIdx];
             }
 
             return {};
         }
 
-        return valueRestoreOps[instIdx];
+        return valueRestoreOps_DEPRECATED[instIdx];
     }
 
-    IrOp findRestoreOp(const IrInst& inst, bool limitToCurrentBlock) const
+    IrOp findRestoreOp_DEPRECATED(const IrInst& inst, bool limitToCurrentBlock) const
     {
-        return findRestoreOp(getInstIndex(inst), limitToCurrentBlock);
+        CODEGEN_ASSERT(!FFlag::LuauCodegenChainedSpills);
+
+        return findRestoreOp_DEPRECATED(getInstIndex(inst), limitToCurrentBlock);
+    }
+
+    void recordRestoreLocation(uint32_t instIdx, ValueRestoreLocation location)
+    {
+        CODEGEN_ASSERT(FFlag::LuauCodegenChainedSpills);
+        CODEGEN_ASSERT(location.op.kind == IrOpKind::None || location.op.kind == IrOpKind::VmReg || location.op.kind == IrOpKind::VmConst);
+
+        if (instIdx >= valueRestoreOps_NEW.size())
+            valueRestoreOps_NEW.resize(instIdx + 1);
+
+        valueRestoreOps_NEW[instIdx] = location;
+    }
+
+    ValueRestoreLocation findRestoreLocation(uint32_t instIdx, bool limitToCurrentBlock) const
+    {
+        CODEGEN_ASSERT(FFlag::LuauCodegenChainedSpills);
+
+        if (instIdx >= valueRestoreOps_NEW.size())
+            return {};
+
+        // When spilled, values can only reference restore operands in the current block chain
+        if (limitToCurrentBlock)
+        {
+            for (uint32_t blockIdx : validRestoreOpBlocks)
+            {
+                const IrBlock& block = blocks[blockIdx];
+
+                if (instIdx >= block.start && instIdx <= block.finish)
+                    return valueRestoreOps_NEW[instIdx];
+            }
+
+            return {};
+        }
+
+        return valueRestoreOps_NEW[instIdx];
+    }
+
+    ValueRestoreLocation findRestoreLocation(const IrInst& inst, bool limitToCurrentBlock) const
+    {
+        CODEGEN_ASSERT(FFlag::LuauCodegenChainedSpills);
+
+        return findRestoreLocation(getInstIndex(inst), limitToCurrentBlock);
+    }
+
+    bool hasRestoreLocation(const IrInst& inst, bool limitToCurrentBlock) const
+    {
+        CODEGEN_ASSERT(FFlag::LuauCodegenChainedSpills);
+
+        return findRestoreLocation(getInstIndex(inst), limitToCurrentBlock).op.kind != IrOpKind::None;
     }
 
     BytecodeTypes getBytecodeTypesAt(int pcpos) const

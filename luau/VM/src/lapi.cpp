@@ -15,8 +15,6 @@
 
 #include <string.h>
 
-LUAU_DYNAMIC_FASTFLAGVARIABLE(LuauSafeStackCheck, false)
-
 /*
  * This file contains most implementations of core Lua APIs from lua.h.
  *
@@ -141,34 +139,27 @@ int lua_checkstack(lua_State* L, int size)
         res = 0; // stack overflow
     else if (size > 0)
     {
-        if (DFFlag::LuauSafeStackCheck)
+        if (stacklimitreached(L, size))
         {
-            if (stacklimitreached(L, size))
+            struct CallContext
             {
-                struct CallContext
+                int size;
+
+                static void run(lua_State* L, void* ud)
                 {
-                    int size;
+                    CallContext* ctx = (CallContext*)ud;
 
-                    static void run(lua_State* L, void* ud)
-                    {
-                        CallContext* ctx = (CallContext*)ud;
+                    luaD_growstack(L, ctx->size);
+                }
+            } ctx = {size};
 
-                        luaD_growstack(L, ctx->size);
-                    }
-                } ctx = {size};
-
-                // there could be no memory to extend the stack
-                if (luaD_rawrunprotected(L, &CallContext::run, &ctx) != LUA_OK)
-                    return 0;
-            }
-            else
-            {
-                condhardstacktests(luaD_reallocstack(L, L->stacksize - EXTRA_STACK, 0));
-            }
+            // there could be no memory to extend the stack
+            if (luaD_rawrunprotected(L, &CallContext::run, &ctx) != LUA_OK)
+                return 0;
         }
         else
         {
-            luaD_checkstack(L, size);
+            condhardstacktests(luaD_reallocstack(L, L->stacksize - EXTRA_STACK, 0));
         }
 
         expandstacklimit(L, L->top + size);
@@ -804,6 +795,16 @@ int lua_rawgeti(lua_State* L, int idx, int n)
     return ttype(L->top - 1);
 }
 
+int lua_rawgetptagged(lua_State* L, int idx, void* p, int tag)
+{
+    luaC_threadbarrier(L);
+    StkId t = index2addr(L, idx);
+    api_check(L, ttistable(t));
+    setobj2s(L, L->top, luaH_getp(hvalue(t), p, tag));
+    api_incr_top(L);
+    return ttype(L->top - 1);
+}
+
 void lua_createtable(lua_State* L, int narray, int nrec)
 {
     luaC_checkGC(L);
@@ -943,6 +944,18 @@ void lua_rawseti(lua_State* L, int idx, int n)
     L->top--;
 }
 
+void lua_rawsetptagged(lua_State* L, int idx, void* p, int tag)
+{
+    api_checknelems(L, 1);
+    StkId o = index2addr(L, idx);
+    api_check(L, ttistable(o));
+    if (hvalue(o)->readonly)
+        luaG_readonlyerror(L);
+    setobj2t(L, luaH_setp(L, hvalue(o), p, tag), L->top - 1);
+    luaC_barriert(L, hvalue(o), L->top - 1);
+    L->top--;
+}
+
 int lua_setmetatable(lua_State* L, int objindex)
 {
     api_checknelems(L, 1);
@@ -1037,8 +1050,9 @@ void lua_call(lua_State* L, int nargs, int nresults)
 /*
 ** Execute a protected call.
 */
+// data to `f_call'
 struct CallS
-{ // data to `f_call'
+{
     StkId func;
     int nresults;
 };
@@ -1069,6 +1083,39 @@ int lua_pcall(lua_State* L, int nargs, int nresults, int errfunc)
 
     adjustresults(L, nresults);
     return status;
+}
+
+/*
+** Execute a protected C call.
+*/
+// data to `f_Ccall'
+struct CCallS
+{
+    lua_CFunction func;
+    void* ud;
+};
+
+static void f_Ccall(lua_State* L, void* ud)
+{
+    struct CCallS* c = cast_to(struct CCallS*, ud);
+
+    if (!lua_checkstack(L, 2))
+        luaG_runerror(L, "stack limit");
+
+    lua_pushcclosurek(L, c->func, nullptr, 0, nullptr);
+    lua_pushlightuserdata(L, c->ud);
+    luaD_call(L, L->top - 2, 0);
+}
+
+int lua_cpcall(lua_State* L, lua_CFunction func, void* ud)
+{
+    api_check(L, L->status == 0);
+
+    struct CCallS c;
+    c.func = func;
+    c.ud = ud;
+
+    return luaD_pcall(L, f_Ccall, &c, savestack(L, L->top), 0);
 }
 
 int lua_status(lua_State* L)

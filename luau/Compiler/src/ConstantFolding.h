@@ -53,7 +53,8 @@ void foldConstants(
     const DenseHashMap<AstExprCall*, int>* builtins,
     bool foldLibraryK,
     LibraryMemberConstantCallback libraryMemberConstantCb,
-    AstNode* root
+    AstNode* root,
+    AstNameTable& stringTable
 );
 
 } // namespace Compile

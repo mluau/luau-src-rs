@@ -118,6 +118,13 @@ struct AstTypeList
     AstTypePack* tailType = nullptr;
 };
 
+// Don't have Luau::Variant available, it's a bit of an overhead, but a plain struct is nice to use
+struct AstTypeOrPack
+{
+    AstType* type = nullptr;
+    AstTypePack* typePack = nullptr;
+};
+
 using AstArgumentName = std::pair<AstName, Location>; // TODO: remove and replace when we get a common struct for this pair instead of AstName
 
 extern int gAstRttiIndex;
@@ -195,9 +202,18 @@ public:
         Checked,
         Native,
         Deprecated,
+        Unknown
     };
 
-    AstAttr(const Location& location, Type type);
+    struct DeprecatedInfo
+    {
+        bool deprecated = false;
+        std::optional<std::string> use;
+        std::optional<std::string> reason;
+    };
+
+    AstAttr(const Location& location, Type type, AstArray<AstExpr*> args);
+    AstAttr(const Location& location, Type type, AstArray<AstExpr*> args, AstName name);
 
     AstAttr* asAttr() override
     {
@@ -206,7 +222,11 @@ public:
 
     void visit(AstVisitor* visitor) override;
 
+    DeprecatedInfo deprecatedInfo() const;
+
     Type type;
+    AstArray<AstExpr*> args;
+    AstName name;
 };
 
 class AstExpr : public AstNode
@@ -329,9 +349,28 @@ public:
 
     enum QuoteStyle
     {
+        // A string created using double quotes or an interpolated string,
+        // as in:
+        //
+        //  "foo", `My name is {protagonist}! / And I'm {antagonist}!`
+        //
         QuotedSimple,
+        // A string created using single quotes, as in:
+        //
+        //  'bar'
+        //
+        QuotedSingle,
+        // A string created using `[[ ... ]]` as in:
+        //
+        //   [[ Gee, this sure is a long string.
+        //   it even has a new line in it! ]]
+        //
         QuotedRaw,
-        Unquoted
+        // A "string" in the context of a table literal, as in:
+        //
+        //  { foo = 42 } -- `foo` here is a "constant string"
+        //
+        Unquoted,
     };
 
     AstExprConstantString(const Location& location, const AstArray<char>& value, QuoteStyle quoteStyle);
@@ -383,11 +422,22 @@ class AstExprCall : public AstExpr
 public:
     LUAU_RTTI(AstExprCall)
 
-    AstExprCall(const Location& location, AstExpr* func, const AstArray<AstExpr*>& args, bool self, const Location& argLocation);
+    AstExprCall(
+        const Location& location,
+        AstExpr* func,
+        const AstArray<AstExpr*>& args,
+        bool self,
+        const AstArray<AstTypeOrPack>& explicitTypes,
+        const Location& argLocation
+    );
 
     void visit(AstVisitor* visitor) override;
 
     AstExpr* func;
+    // These will only be filled in specifically `t:f<<A, B>>()`.
+    // In `f<<A, B>>()`, this is parsed as `f<<A, B>>` as an expression,
+    // which is then called.
+    AstArray<AstTypeOrPack> typeArguments;
     AstArray<AstExpr*> args;
     bool self;
     Location argLocation;
@@ -455,6 +505,7 @@ public:
 
     bool hasNativeAttribute() const;
     bool hasAttribute(AstAttr::Type attributeType) const;
+    AstAttr* getAttribute(AstAttr::Type attributeType) const;
 
     AstArray<AstAttr*> attributes;
     AstArray<AstGenericType*> generics;
@@ -498,6 +549,8 @@ public:
     AstExprTable(const Location& location, const AstArray<Item>& items);
 
     void visit(AstVisitor* visitor) override;
+
+    std::optional<AstExpr*> getRecord(const char* key) const;
 
     AstArray<Item> items;
 };
@@ -605,6 +658,20 @@ public:
     /// `strings` will always have one more element than `expressions`.
     AstArray<AstArray<char>> strings;
     AstArray<AstExpr*> expressions;
+};
+
+// f<<T>>
+class AstExprInstantiate : public AstExpr
+{
+public:
+    LUAU_RTTI(AstExprInstantiate)
+
+    AstExprInstantiate(const Location& location, AstExpr* expr, AstArray<AstTypeOrPack> typePack);
+
+    void visit(AstVisitor* visitor) override;
+
+    AstExpr* expr;
+    AstArray<AstTypeOrPack> typeArguments;
 };
 
 class AstStatBlock : public AstStat
@@ -960,6 +1027,7 @@ public:
 
     bool isCheckedFunction() const;
     bool hasAttribute(AstAttr::Type attributeType) const;
+    AstAttr* getAttribute(AstAttr::Type attributeType) const;
 
     AstArray<AstAttr*> attributes;
     AstName name;
@@ -1033,13 +1101,6 @@ public:
     {
         return this;
     }
-};
-
-// Don't have Luau::Variant available, it's a bit of an overhead, but a plain struct is nice to use
-struct AstTypeOrPack
-{
-    AstType* type = nullptr;
-    AstTypePack* typePack = nullptr;
 };
 
 class AstTypeReference : public AstType
@@ -1117,6 +1178,7 @@ public:
 
     bool isCheckedFunction() const;
     bool hasAttribute(AstAttr::Type attributeType) const;
+    AstAttr* getAttribute(AstAttr::Type attributeType) const;
 
     AstArray<AstAttr*> attributes;
     AstArray<AstGenericType*> generics;
@@ -1561,6 +1623,8 @@ public:
 };
 
 bool isLValue(const AstExpr*);
+bool isConstantLiteral(const AstExpr*);
+bool isLiteralTable(const AstExpr*);
 AstName getIdentifier(AstExpr*);
 Location getLocation(const AstTypeList& typeList);
 

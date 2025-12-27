@@ -169,6 +169,10 @@ const char* getCmdName(IrCmd cmd)
         return "SIGN_NUM";
     case IrCmd::SELECT_NUM:
         return "SELECT_NUM";
+    case IrCmd::MULADD_NUM:
+        return "MULADD_NUM";
+    case IrCmd::SELECT_VEC:
+        return "SELECT_VEC";
     case IrCmd::ADD_VEC:
         return "ADD_VEC";
     case IrCmd::SUB_VEC:
@@ -181,10 +185,18 @@ const char* getCmdName(IrCmd cmd)
         return "UNM_VEC";
     case IrCmd::DOT_VEC:
         return "DOT_VEC";
+    case IrCmd::MULADD_VEC:
+        return "MULADD_VEC";
     case IrCmd::NOT_ANY:
         return "NOT_ANY";
     case IrCmd::CMP_ANY:
         return "CMP_ANY";
+    case IrCmd::CMP_INT:
+        return "CMP_INT";
+    case IrCmd::CMP_TAG:
+        return "CMP_TAG";
+    case IrCmd::CMP_SPLIT_TVALUE:
+        return "CMP_SPLIT_TVALUE";
     case IrCmd::JUMP:
         return "JUMP";
     case IrCmd::JUMP_IF_TRUTHY:
@@ -249,8 +261,6 @@ const char* getCmdName(IrCmd cmd)
         return "GET_TABLE";
     case IrCmd::SET_TABLE:
         return "SET_TABLE";
-    case IrCmd::GET_IMPORT:
-        return "GET_IMPORT";
     case IrCmd::GET_CACHED_IMPORT:
         return "GET_CACHED_IMPORT";
     case IrCmd::CONCAT:
@@ -887,6 +897,9 @@ std::string toString(const IrFunction& function, IncludeUseInfo includeUseInfo)
             continue;
         }
 
+        if ((block.flags & kBlockFlagSafeEnvCheck) != 0)
+            append(ctx.result, "   implicit CHECK_SAFE_ENV exit(%u)\n", block.startpc);
+
         // To allow dumping blocks that are still being constructed, we can't rely on terminator and need a bounds check
         for (uint32_t index = block.start; index <= block.finish && index < uint32_t(function.instructions.size()); index++)
         {
@@ -898,6 +911,13 @@ std::string toString(const IrFunction& function, IncludeUseInfo includeUseInfo)
 
             append(ctx.result, " ");
             toStringDetailed(ctx, block, uint32_t(i), inst, index, includeUseInfo);
+        }
+
+        if (block.expectedNextBlock != ~0u)
+        {
+            append(ctx.result, "; glued to: ");
+            toString(ctx, ctx.blocks[block.expectedNextBlock], block.expectedNextBlock);
+            append(ctx.result, "\n");
         }
 
         append(ctx.result, "\n");

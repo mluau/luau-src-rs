@@ -2,9 +2,11 @@
 
 #include "Luau/RequireNavigator.h"
 
-#include "Luau/PathUtilities.h"
+#include "AliasCycleTracker.h"
+#include "PathUtilities.h"
 
 #include "Luau/Config.h"
+#include "Luau/LuauConfig.h"
 
 #include <algorithm>
 #include <optional>
@@ -75,28 +77,40 @@ Error Navigator::navigateImpl(std::string_view path)
             }
         );
 
-        if (Error error = navigateToAndPopulateConfig(alias))
+        Config config;
+        if (Error error = navigateToAndPopulateConfig(alias, config))
             return error;
 
-        if (!foundAliasValue)
+        if (config.aliases.contains(alias))
         {
-            if (alias != "self")
-                return "@" + alias + " is not a valid alias";
-
-            // If the alias is "@self", we reset to the requirer's context and
-            // navigate directly from there.
-            if (Error error = resetToRequirer())
+            if (Error error = navigateToAlias(alias, config, {}))
                 return error;
             if (Error error = navigateThroughPath(path))
                 return error;
 
             return std::nullopt;
         }
+        else
+        {
+            if (alias == "self")
+            {
+                // If the alias is "@self", we reset to the requirer's context and
+                // navigate directly from there.
+                if (Error error = resetToRequirer())
+                    return error;
+                if (Error error = navigateThroughPath(path))
+                    return error;
 
-        if (Error error = navigateToAlias(alias, *foundAliasValue))
-            return error;
-        if (Error error = navigateThroughPath(path))
-            return error;
+                return std::nullopt;
+            }
+
+            if (Error error = toAliasFallback(alias))
+                return error;
+            if (Error error = navigateThroughPath(path))
+                return error;
+
+            return std::nullopt;
+        }
     }
 
     if (pathType == PathType::RelativeToCurrent || pathType == PathType::RelativeToParent)
@@ -145,8 +159,10 @@ Error Navigator::navigateThroughPath(std::string_view path)
     return std::nullopt;
 }
 
-Error Navigator::navigateToAlias(const std::string& alias, const std::string& value)
+Error Navigator::navigateToAlias(const std::string& alias, const Config& config, AliasCycleTracker cycleTracker)
 {
+    LUAU_ASSERT(config.aliases.contains(alias));
+    std::string value = config.aliases.find(alias)->value;
     PathType pathType = getPathType(value);
 
     if (pathType == PathType::RelativeToCurrent || pathType == PathType::RelativeToParent)
@@ -156,7 +172,35 @@ Error Navigator::navigateToAlias(const std::string& alias, const std::string& va
     }
     else if (pathType == PathType::Aliased)
     {
-        return "alias \"@" + alias + "\" cannot point to an aliased path (\"" + value + "\")";
+        if (Error error = cycleTracker.add(alias))
+            return error;
+
+        std::string nextAlias = extractAlias(value);
+        if (config.aliases.contains(nextAlias))
+        {
+            if (Error error = navigateToAlias(nextAlias, config, std::move(cycleTracker)))
+                return error;
+        }
+        else
+        {
+            Config parentConfig;
+            if (Error error = navigateToAndPopulateConfig(nextAlias, parentConfig))
+                return error;
+
+            if (parentConfig.aliases.contains(nextAlias))
+            {
+                if (Error error = navigateToAlias(nextAlias, parentConfig, {}))
+                    return error;
+            }
+            else
+            {
+                if (Error error = toAliasFallback(nextAlias))
+                    return error;
+            }
+        }
+
+        if (Error error = navigateThroughPath(value))
+            return error;
     }
     else
     {
@@ -167,38 +211,58 @@ Error Navigator::navigateToAlias(const std::string& alias, const std::string& va
     return std::nullopt;
 }
 
-Error Navigator::navigateToAndPopulateConfig(const std::string& desiredAlias)
+Error Navigator::navigateToAndPopulateConfig(const std::string& desiredAlias, Config& config)
 {
-    Luau::Config config;
-
-    while (!foundAliasValue)
+    while (!config.aliases.contains(desiredAlias))
     {
-        if (navigationContext.toParent() != NavigationContext::NavigateResult::Success)
-            break;
+        config = {}; // Clear existing config data.
 
-        if (navigationContext.isConfigPresent())
+        NavigationContext::NavigateResult result = navigationContext.toParent();
+        if (result == NavigationContext::NavigateResult::Ambiguous)
+            return "could not navigate up the ancestry chain during search for alias \"" + desiredAlias + "\" (ambiguous)";
+        if (result == NavigationContext::NavigateResult::NotFound)
+            break; // Not treated as an error: interpreted as reaching the root.
+
+        NavigationContext::ConfigStatus status = navigationContext.getConfigStatus();
+        if (status == NavigationContext::ConfigStatus::Absent)
+        {
+            continue;
+        }
+        else if (status == NavigationContext::ConfigStatus::Ambiguous)
+        {
+            return "could not resolve alias \"" + desiredAlias + "\" (ambiguous configuration file)";
+        }
+        else
         {
             if (navigationContext.getConfigBehavior() == NavigationContext::ConfigBehavior::GetAlias)
             {
-                foundAliasValue = navigationContext.getAlias(desiredAlias);
+                config.setAlias(desiredAlias, *navigationContext.getAlias(desiredAlias), /* configLocation = */ "unused");
+                break;
             }
-            else
+
+            std::optional<std::string> configContents = navigationContext.getConfig();
+            if (!configContents)
+                return "could not get configuration file contents to resolve alias \"" + desiredAlias + "\"";
+
+            Luau::ConfigOptions opts;
+            Luau::ConfigOptions::AliasOptions aliasOpts;
+            aliasOpts.configLocation = "unused";
+            aliasOpts.overwriteAliases = false;
+            opts.aliasOptions = std::move(aliasOpts);
+
+            if (status == NavigationContext::ConfigStatus::PresentJson)
             {
-                std::optional<std::string> configContents = navigationContext.getConfig();
-                if (!configContents)
-                    return "could not get configuration file contents to resolve alias \"" + desiredAlias + "\"";
-
-                Luau::ConfigOptions opts;
-                Luau::ConfigOptions::AliasOptions aliasOpts;
-                aliasOpts.configLocation = "unused";
-                aliasOpts.overwriteAliases = false;
-                opts.aliasOptions = std::move(aliasOpts);
-
                 if (Error error = Luau::parseConfig(*configContents, config, opts))
                     return error;
+            }
+            else if (status == NavigationContext::ConfigStatus::PresentLuau)
+            {
+                InterruptCallbacks callbacks;
+                callbacks.initCallback = navigationContext.luauConfigInit;
+                callbacks.interruptCallback = navigationContext.luauConfigInterrupt;
 
-                if (config.aliases.contains(desiredAlias))
-                    foundAliasValue = config.aliases[desiredAlias].value;
+                if (Error error = Luau::extractLuauConfig(*configContents, config, std::move(opts.aliasOptions), std::move(callbacks)))
+                    return error;
             }
         }
     };
@@ -253,6 +317,18 @@ Error Navigator::navigateToChild(const std::string& component)
         return std::nullopt;
 
     std::string errorMessage = "could not resolve child component \"" + component + "\"";
+    if (result == NavigationContext::NavigateResult::Ambiguous)
+        errorMessage += " (ambiguous)";
+    return errorMessage;
+}
+
+Error Navigator::toAliasFallback(const std::string& aliasUnprefixed)
+{
+    NavigationContext::NavigateResult result = navigationContext.toAliasFallback(aliasUnprefixed);
+    if (result == NavigationContext::NavigateResult::Success)
+        return std::nullopt;
+
+    std::string errorMessage = "@" + aliasUnprefixed + " is not a valid alias";
     if (result == NavigationContext::NavigateResult::Ambiguous)
         errorMessage += " (ambiguous)";
     return errorMessage;

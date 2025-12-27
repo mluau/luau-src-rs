@@ -2,10 +2,14 @@
 #pragma once
 
 #include "Luau/Config.h"
+#include "Luau/LuauConfig.h"
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
+
+struct lua_State;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -22,6 +26,8 @@
 
 namespace Luau::Require
 {
+
+class AliasCycleTracker;
 
 // The ErrorHandler interface is used to report errors during navigation.
 // The default implementation does nothing but can be overridden to enable
@@ -55,6 +61,10 @@ public:
 
     virtual NavigateResult reset(const std::string& identifier) = 0;
     virtual NavigateResult jumpToAlias(const std::string& path) = 0;
+    virtual NavigateResult toAliasFallback(const std::string& aliasUnprefixed)
+    {
+        return NavigateResult::NotFound;
+    };
 
     virtual NavigateResult toParent() = 0;
     virtual NavigateResult toChild(const std::string& component) = 0;
@@ -65,10 +75,21 @@ public:
         GetConfig
     };
 
-    virtual bool isConfigPresent() const = 0;
+    enum class ConfigStatus
+    {
+        Absent,
+        Ambiguous,
+        PresentJson,
+        PresentLuau
+    };
+
+    virtual ConfigStatus getConfigStatus() const = 0;
+
+    std::function<void(lua_State*)> luauConfigInit = nullptr;
+    void (*luauConfigInterrupt)(lua_State* L, int gc) = nullptr;
 
     // The result of getConfigBehavior determines whether getAlias or getConfig
-    // is called when isConfigPresent returns true.
+    // is called when getConfigStatus indicates a configuration is present.
     virtual ConfigBehavior getConfigBehavior() const = 0;
     virtual std::optional<std::string> getAlias(const std::string& alias) const = 0;
     virtual std::optional<std::string> getConfig() const = 0;
@@ -95,13 +116,14 @@ private:
     using Error = std::optional<std::string>;
     [[nodiscard]] Error navigateImpl(std::string_view path);
     [[nodiscard]] Error navigateThroughPath(std::string_view path);
-    [[nodiscard]] Error navigateToAlias(const std::string& alias, const std::string& value);
-    [[nodiscard]] Error navigateToAndPopulateConfig(const std::string& desiredAlias);
+    [[nodiscard]] Error navigateToAlias(const std::string& alias, const Config& config, AliasCycleTracker cycleTracker);
+    [[nodiscard]] Error navigateToAndPopulateConfig(const std::string& desiredAlias, Config& config);
 
     [[nodiscard]] Error resetToRequirer();
     [[nodiscard]] Error jumpToAlias(const std::string& aliasPath);
     [[nodiscard]] Error navigateToParent(std::optional<std::string> previousComponent);
     [[nodiscard]] Error navigateToChild(const std::string& component);
+    [[nodiscard]] Error toAliasFallback(const std::string& aliasUnprefixed);
 
     NavigationContext& navigationContext;
     ErrorHandler& errorHandler;
