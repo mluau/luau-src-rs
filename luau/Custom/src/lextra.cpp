@@ -63,6 +63,6 @@ extern "C" int luau_try(lua_State* L, RustCallback func, void* data) {
             return 2; 
         }
     } catch (...) { 
-        return 2; 
+        throw;
     }
 }

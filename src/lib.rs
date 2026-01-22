@@ -99,6 +99,8 @@ impl Build {
             // Enable c++ exceptions for emscripten (it's disabled by default)
             // Later we should switch to wasm exceptions
             config.flag_if_supported("-fexceptions");
+        } else {
+            config.flag_if_supported("-fexceptions");
         }
 
         // Common defines
