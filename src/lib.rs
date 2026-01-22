@@ -8,8 +8,6 @@ pub struct Build {
     host: Option<String>,
     // Max number of Lua stack slots that a C function can use
     max_cstack_size: usize,
-    // Use longjmp instead of C++ exceptions
-    use_longjmp: bool,
     // Enable code generator (jit)
     enable_codegen: bool,
     // Vector size, must be 3 (default) or 4
@@ -29,7 +27,6 @@ impl Default for Build {
             target: env::var("TARGET").ok(),
             host: env::var("HOST").ok(),
             max_cstack_size: 1000000,
-            use_longjmp: false,
             enable_codegen: false,
             vector_size: 3,
         }
@@ -60,11 +57,6 @@ impl Build {
 
     pub fn set_max_cstack_size(&mut self, size: usize) -> &mut Build {
         self.max_cstack_size = size;
-        self
-    }
-
-    pub fn use_longjmp(&mut self, r#use: bool) -> &mut Build {
-        self.use_longjmp = r#use;
         self
     }
 
@@ -113,10 +105,6 @@ impl Build {
         config.define("LUAI_MAXCSTACK", &*self.max_cstack_size.to_string());
         config.define("LUA_VECTOR_SIZE", &*self.vector_size.to_string());
         config.define("LUA_API", "extern \"C\"");
-
-        if self.use_longjmp {
-            config.define("LUA_USE_LONGJMP", "1");
-        }
 
         if cfg!(debug_assertions) {
             config.define("LUAU_ENABLE_ASSERT", None);

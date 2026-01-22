@@ -4,6 +4,9 @@
 #include "lobject.h"
 #include "lstate.h"
 #include "lgc.h"
+#include <stdexcept>
+
+using namespace std;
 
 extern "C" const void* lua_getmetatablepointer(lua_State* L, int objindex)
 {
@@ -34,4 +37,27 @@ extern "C" int64_t lua_gcallocationrate(lua_State* L) {
 extern "C" void lua_gcdump(lua_State* L, void* file, const char* (*categoryName)(lua_State* L, uint8_t memcat))
 {
     luaC_dump(L, file, categoryName);
+}
+
+// Helper to call Rust code that may throw exceptions from C++ code (e.g. if protect fails)
+//
+// Can also be a alternative to lua_pcall for performance critical sections
+//
+// Returns 0 on success, 1 on exception pushed to stack, 2 for exception that could not be pushed to stack
+// (e.g. either stack failed or catch-all triggered)
+typedef void (*RustCallback)(lua_State* L, void* data) noexcept(false);
+extern "C" int luau_try(lua_State* L, RustCallback func, void* data) {
+    try { 
+        func(L, data); 
+        return 0; 
+    } catch (const std::exception& e) {
+        try {
+            lua_pushstring(L, e.what()); 
+            return 1;
+        } catch (...) { 
+            return 2; 
+        }
+    } catch (...) { 
+        return 2; 
+    }
 }
