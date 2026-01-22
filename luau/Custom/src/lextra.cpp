@@ -52,6 +52,7 @@ extern "C" int luau_try(lua_State* L, RustCallback func, void* data) {
         return 0; 
     } catch (const std::exception& e) {
         try {
+            lua_checkstack(L, 1);
             lua_pushstring(L, e.what()); 
             return 1;
         } catch (...) { 
