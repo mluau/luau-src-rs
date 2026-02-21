@@ -328,6 +328,8 @@ LUA_API double lua_clock();
 
 LUA_API void lua_setuserdatatag(lua_State* L, int idx, int tag);
 
+typedef void (*lua_Destructor)(lua_State* L, void* userdata);
+
 LUA_API void lua_setuserdatadtor(lua_State* L, int tag, lua_Destructor dtor);
 LUA_API lua_Destructor lua_getuserdatadtor(lua_State* L, int tag);
 
